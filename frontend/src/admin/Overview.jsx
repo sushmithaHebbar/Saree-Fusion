@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { adminFetch } from './api.js';
+import UsageAnalytics from './UsageAnalytics.jsx';
 
 const fmtBytes = (n) => (n > 1e9 ? `${(n / 1e9).toFixed(2)} GB` : n > 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.round(n / 1e3)} KB`);
 const SERIES = [['batches', '#8b7bff'], ['orders', '#34d3b6'], ['signups', '#f5b84b']];
@@ -48,6 +49,7 @@ export default function Overview() {
           <div className="ad-legend">{SERIES.map(([k, c]) => <span key={k}><b style={{ background: c }} />{k}</span>)}</div></div>
         <Chart data={d.series} />
       </section>
+      <UsageAnalytics />
       <section className="ad-glass ad-panel">
         <h2>Recent activity</h2>
         <ul className="ad-feed">

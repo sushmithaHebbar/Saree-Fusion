@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { adminFetch } from './api.js';
 import Inspector from './Inspector.jsx';
+import { UsageMeter } from './CreditControls.jsx';
 
 export default function Users() {
   const [users, setUsers] = useState(null);
@@ -23,6 +24,8 @@ export default function Users() {
   };
 
   const when = (v) => (v ? new Date(v).toLocaleDateString() : '—');
+  // Keep the table in sync when credits change inside the Inspector
+  const onUsage = (id, usage) => setUsers((us) => us.map((x) => (x.id === id ? { ...x, usage } : x)));
 
   return (
     <>
@@ -31,7 +34,7 @@ export default function Users() {
       {err && <div className="ad-error">{err}</div>}
       {!users ? <div className="ad-muted">Loading users…</div> : (
         <div className="ad-table">
-          <div className="ad-tr head"><span>User</span><span>Status</span><span>Batches</span><span>Orders</span><span>Joined</span><span>Last login</span><span /></div>
+          <div className="ad-tr head"><span>User</span><span>Status</span><span>Today</span><span>Uploads</span><span>Batches</span><span>Last login</span><span /></div>
           {rows.map((u) => (
             <div className="ad-tr" key={u.id}>
               <span data-l="User" className="ad-user">
@@ -39,12 +42,12 @@ export default function Users() {
                 <b>{u.name || '—'}<small>{u.email}</small></b>
               </span>
               <span data-l="Status"><em className={`ad-pill ${u.status}`}>{u.status}</em></span>
+              <span data-l="Today"><UsageMeter usage={u.usage} compact /></span>
+              <span data-l="Uploads" title="Images uploaded today / all time">{u.usage ? `${u.usage.uploadsToday} / ${u.usage.uploadsTotal}` : '—'}</span>
               <span data-l="Batches">{u.batches}</span>
-              <span data-l="Orders">{u.orders}</span>
-              <span data-l="Joined">{when(u.createdAt)}</span>
               <span data-l="Last login">{when(u.lastLoginAt)}</span>
               <span className="ad-actions">
-                <button className="ad-btn" onClick={() => setSel(u)}>Inspect</button>
+                <button className="ad-btn" onClick={() => setSel(u)}>Inspect &amp; credits</button>
                 <button className={`ad-btn ${u.status === 'suspended' ? '' : 'danger'}`} disabled={busyId === u.id} onClick={() => toggle(u)}>
                   {u.status === 'suspended' ? 'Restore' : 'Suspend'}
                 </button>
@@ -54,7 +57,7 @@ export default function Users() {
           {!rows.length && <div className="ad-muted ad-pad">No users match.</div>}
         </div>
       )}
-      {sel && <Inspector user={sel} onClose={() => setSel(null)} />}
+      {sel && <Inspector user={sel} onClose={() => setSel(null)} onUsage={onUsage} />}
     </>
   );
 }

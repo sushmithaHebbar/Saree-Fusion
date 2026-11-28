@@ -53,7 +53,11 @@ def overview():
 @admin_bp.route("/users", methods=["GET"])
 @admin.require_admin
 def users():
-    return jsonify({"users": db.admin_list_users()})
+    users_ = db.admin_list_users()
+    usage_ = db.admin_usage_all()
+    for u in users_:
+        u["usage"] = usage_.get(u["id"])
+    return jsonify({"users": users_})
 
 
 @admin_bp.route("/users/<user_id>/status", methods=["PATCH"])
@@ -75,6 +79,54 @@ def user_records(user_id):
     if records is None:
         return jsonify({"error": "User not found."}), 404
     return jsonify(records)
+
+
+# --------------------------------------------------------------------------
+# Usage analytics, generations gallery and daily credit controls
+# --------------------------------------------------------------------------
+@admin_bp.route("/usage", methods=["GET"])
+@admin.require_admin
+def usage():
+    try:
+        days = int(request.args.get("days", 30))
+    except ValueError:
+        days = 30
+    return jsonify(db.admin_usage_analytics(days))
+
+
+@admin_bp.route("/generations", methods=["GET"])
+@admin.require_admin
+def generations():
+    try:
+        limit = int(request.args.get("limit", 24))
+    except ValueError:
+        limit = 24
+    items = db.admin_generations(limit=limit, before=request.args.get("before") or None,
+                                 user_id=request.args.get("user") or None)
+    return jsonify({"items": items})
+
+
+CREDIT_ACTIONS = ("pause", "resume", "reset", "add", "limit")
+
+
+@admin_bp.route("/users/<user_id>/credits", methods=["POST"])
+@admin.require_admin
+def user_credits(user_id):
+    body = request.get_json(silent=True) or {}
+    action = body.get("action")
+    amount = body.get("amount")
+    if action not in CREDIT_ACTIONS:
+        return jsonify({"error": f"action must be one of {', '.join(CREDIT_ACTIONS)}."}), 400
+    if action in ("add", "limit"):
+        if not isinstance(amount, int) or isinstance(amount, bool) or not 0 <= amount <= 1000:
+            return jsonify({"error": "amount must be a whole number from 0 to 1000."}), 400
+    if action == "pause" and amount is not None and (not isinstance(amount, int) or not 1 <= amount <= 720):
+        return jsonify({"error": "Pause hours must be 1 to 720."}), 400
+    status = db.admin_credit_action(user_id, action, amount)
+    if status is None:
+        return jsonify({"error": "User not found."}), 404
+    db.record_admin_action(f"credits.{action}", target_id=user_id, detail={"amount": amount})
+    return jsonify(status)
 
 
 # --------------------------------------------------------------------------

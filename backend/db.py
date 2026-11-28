@@ -102,6 +102,20 @@ CREATE TABLE IF NOT EXISTS admin_login_attempts (
 );
 CREATE INDEX IF NOT EXISTS admin_login_attempts_ip_idx ON admin_login_attempts (ip, attempted_at DESC);
 
+-- Usage metering: one row per generation ('generate') and per uploaded image
+-- batch ('upload', count = images in that request). Drives the daily output
+-- limit and the admin usage analytics.
+CREATE TABLE IF NOT EXISTS usage_events (
+    id          BIGSERIAL PRIMARY KEY,
+    user_id     UUID REFERENCES users(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL,
+    count       INTEGER NOT NULL DEFAULT 1,
+    batch_id    TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS usage_events_user_idx ON usage_events (user_id, kind, created_at DESC);
+CREATE INDEX IF NOT EXISTS usage_events_time_idx ON usage_events (created_at);
+
 -- Small key/value store for things the admin edits (e.g. the Help phone number).
 CREATE TABLE IF NOT EXISTS app_settings (
     key         TEXT PRIMARY KEY,
@@ -115,7 +129,56 @@ _MIGRATIONS = [
     "ALTER TABLE files ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id) ON DELETE CASCADE",
     # `users` has live rows, so the admin portal's status column must be an ALTER.
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'",
+    # Daily output credits (see usage_status): per-user limit, today's extra
+    # credits granted by an admin, a manual reset point and a pause.
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_limit INTEGER NOT NULL DEFAULT 15",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS bonus_credits INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS bonus_date DATE",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS usage_reset_at TIMESTAMPTZ",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS paused_until TIMESTAMPTZ",
+    # Backfill usage history from batches created before metering existed
+    # (idempotent: only batches with no usage rows yet)
+    """
+    INSERT INTO usage_events (user_id, kind, count, batch_id, created_at)
+    SELECT b.user_id, 'generate', GREATEST(1, COALESCE(jsonb_array_length(b.data->'designs'), 1)), b.id, b.created_at
+    FROM batches b
+    WHERE b.user_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM usage_events e WHERE e.batch_id = b.id)
+    """,
+    """
+    INSERT INTO usage_events (user_id, kind, count, batch_id, created_at)
+    SELECT b.user_id, 'upload',
+           COALESCE((b.data->>'palluCount')::int, 0) + COALESCE((b.data->>'borderCount')::int, 0)
+             + COALESCE((b.data->>'bodyCount')::int, 0),
+           b.id, b.created_at
+    FROM batches b
+    WHERE b.user_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM usage_events e WHERE e.batch_id = b.id AND e.kind = 'upload')
+      AND COALESCE((b.data->>'palluCount')::int, 0) + COALESCE((b.data->>'borderCount')::int, 0)
+            + COALESCE((b.data->>'bodyCount')::int, 0) > 0
+    """,
 ]
+
+
+def _use_system_libpq_on_windows():
+    """Let psycopg load libpq from a local PostgreSQL install on Windows.
+
+    Windows Smart App Control can block the DLL bundled with psycopg[binary].
+    When a PostgreSQL install exists, put its signed bin/ on PATH and select
+    the pure-python implementation, which loads that libpq instead. No-op on
+    Linux (e.g. Vercel) and when PSYCOPG_IMPL is already set.
+    """
+    if os.name != "nt" or os.environ.get("PSYCOPG_IMPL"):
+        return
+    import glob
+
+    bins = sorted(glob.glob(r"C:\Program Files\PostgreSQL\*\bin\libpq.dll"))
+    if not bins:
+        return
+    bin_dir = os.path.dirname(bins[-1])
+    os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+    os.add_dll_directory(bin_dir)
+    os.environ["PSYCOPG_IMPL"] = "python"
 
 
 def connect():
@@ -130,6 +193,7 @@ def connect():
             "            DATABASE_URL=postgresql://postgres:dev@localhost:5432/sareefusion\n"
             "  Hosted: create a free database at neon.tech or supabase.com and use its URL."
         )
+    _use_system_libpq_on_windows()
     import psycopg  # imported lazily so tooling that only reads this file needs no driver
 
     conn = psycopg.connect(DATABASE_URL, autocommit=True)
@@ -634,3 +698,220 @@ def set_setting(key, value):
             """,
             (key, value),
         )
+
+
+# --------------------------------------------------------------------------
+# Usage metering and daily output credits
+# --------------------------------------------------------------------------
+# A "day" is the calendar day in USAGE_TZ (weavers are in India by default),
+# so the counter resets at local midnight, not UTC midnight.
+DEFAULT_DAILY_LIMIT = 15
+USAGE_TZ = os.environ.get("USAGE_TZ", "Asia/Kolkata")
+_DAY_START = "(date_trunc('day', now() AT TIME ZONE %(tz)s) AT TIME ZONE %(tz)s)"
+_TODAY = "((now() AT TIME ZONE %(tz)s)::date)"
+
+
+def record_usage(user_id, kind, count=1, batch_id=None):
+    if not user_id or count <= 0:
+        return
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO usage_events (user_id, kind, count, batch_id) VALUES (%s, %s, %s, %s)",
+            (user_id, kind, int(count), batch_id),
+        )
+
+
+def _usage_row(conn, uid):
+    """Raw counters for one user, or None. Shared by usage_status and the admin list."""
+    return conn.execute(
+        f"""
+        SELECT u.daily_limit,
+               CASE WHEN u.bonus_date = {_TODAY} THEN u.bonus_credits ELSE 0 END,
+               u.paused_until, u.paused_until > now(),
+               COALESCE((SELECT sum(e.count) FROM usage_events e
+                          WHERE e.user_id = u.id AND e.kind = 'generate'
+                            AND e.created_at >= GREATEST({_DAY_START},
+                                  COALESCE(u.usage_reset_at, '-infinity'::timestamptz))), 0),
+               COALESCE((SELECT sum(e.count) FROM usage_events e
+                          WHERE e.user_id = u.id AND e.kind = 'upload' AND e.created_at >= {_DAY_START}), 0),
+               COALESCE((SELECT sum(e.count) FROM usage_events e
+                          WHERE e.user_id = u.id AND e.kind = 'upload'), 0),
+               COALESCE((SELECT sum(e.count) FROM usage_events e
+                          WHERE e.user_id = u.id AND e.kind = 'generate'), 0),
+               {_DAY_START} + interval '1 day'
+        FROM users u WHERE u.id = %(uid)s
+        """,
+        {"tz": USAGE_TZ, "uid": uid},
+    ).fetchone()
+
+
+def _usage_dict(r):
+    limit = int(r[0]) + int(r[1])
+    used = int(r[4])
+    paused = bool(r[3])
+    return {
+        "used": used, "limit": limit, "baseLimit": int(r[0]), "bonus": int(r[1]),
+        "remaining": max(0, limit - used),
+        "paused": paused, "pausedUntil": r[2].isoformat() if paused and r[2] else None,
+        "blocked": paused or used >= limit,
+        "uploadsToday": int(r[5]), "uploadsTotal": int(r[6]), "generatedTotal": int(r[7]),
+        "resetAt": r[8].isoformat(),
+    }
+
+
+def usage_status(user_id):
+    """Today's credits for one user: used / limit, pause state, reset time."""
+    uid = _valid_uuid(user_id)
+    if not uid:
+        return None
+    with connect() as conn:
+        r = _usage_row(conn, uid)
+    return _usage_dict(r) if r else None
+
+
+def admin_credit_action(user_id, action, amount=None):
+    """Admin credit controls. Returns the user's new usage status, or None.
+
+    pause   - stop generating until the next daily reset (or `amount` hours)
+    resume  - lift a pause now
+    reset   - today's counter back to 0 (used counted from now)
+    add     - extra credits for today only (default +daily limit)
+    limit   - set the user's standing daily limit
+    """
+    uid = _valid_uuid(user_id)
+    if not uid:
+        return None
+    p = {"tz": USAGE_TZ, "uid": uid}
+    with connect() as conn:
+        if not conn.execute("SELECT 1 FROM users WHERE id = %(uid)s", p).fetchone():
+            return None
+        if action == "pause":
+            if amount:
+                p["h"] = int(amount)
+                conn.execute("UPDATE users SET paused_until = now() + make_interval(hours => %(h)s) WHERE id = %(uid)s", p)
+            else:
+                conn.execute(f"UPDATE users SET paused_until = {_DAY_START} + interval '1 day' WHERE id = %(uid)s", p)
+        elif action == "resume":
+            conn.execute("UPDATE users SET paused_until = NULL WHERE id = %(uid)s", p)
+        elif action == "reset":
+            conn.execute("UPDATE users SET usage_reset_at = now(), paused_until = NULL WHERE id = %(uid)s", p)
+        elif action == "add":
+            p["n"] = int(amount)
+            conn.execute(
+                f"""UPDATE users SET
+                      bonus_credits = CASE WHEN bonus_date = {_TODAY} THEN bonus_credits ELSE 0 END + %(n)s,
+                      bonus_date = {_TODAY}, paused_until = NULL
+                    WHERE id = %(uid)s""", p)
+        elif action == "limit":
+            p["n"] = int(amount)
+            conn.execute("UPDATE users SET daily_limit = %(n)s WHERE id = %(uid)s", p)
+        else:
+            raise ValueError(action)
+        r = _usage_row(conn, uid)
+    return _usage_dict(r)
+
+
+def admin_usage_all():
+    """{user_id: usage dict} for every user (admin users list)."""
+    with connect() as conn:
+        ids = [str(r[0]) for r in conn.execute("SELECT id FROM users").fetchall()]
+        return {uid: _usage_dict(_usage_row(conn, uid)) for uid in ids}
+
+
+def admin_usage_analytics(days=30):
+    """Usage frequency for the admin charts, over the last `days` local days."""
+    days = max(1, min(int(days), 365))
+    p = {"tz": USAGE_TZ, "days": days}
+    since = f"({_DAY_START} - make_interval(days => %(days)s - 1))"
+    with connect() as conn:
+        daily = conn.execute(
+            f"""
+            SELECT to_char(d, 'YYYY-MM-DD'),
+                   COALESCE(sum(e.count) FILTER (WHERE e.kind = 'generate'), 0),
+                   COALESCE(sum(e.count) FILTER (WHERE e.kind = 'upload'), 0),
+                   count(DISTINCT e.user_id)
+            FROM generate_series({_TODAY} - (%(days)s - 1), {_TODAY}, interval '1 day') AS d
+            LEFT JOIN usage_events e ON (e.created_at AT TIME ZONE %(tz)s)::date = d::date
+            GROUP BY d ORDER BY d
+            """, p).fetchall()
+        hourly = conn.execute(
+            f"""
+            SELECT h, COALESCE(sum(e.count), 0)
+            FROM generate_series(0, 23) AS h
+            LEFT JOIN usage_events e ON e.kind = 'generate' AND e.created_at >= {since}
+                 AND extract(hour FROM e.created_at AT TIME ZONE %(tz)s) = h
+            GROUP BY h ORDER BY h
+            """, p).fetchall()
+        weekday = conn.execute(
+            f"""
+            SELECT w, COALESCE(sum(e.count), 0)
+            FROM generate_series(0, 6) AS w
+            LEFT JOIN usage_events e ON e.kind = 'generate' AND e.created_at >= {since}
+                 AND extract(isodow FROM e.created_at AT TIME ZONE %(tz)s) - 1 = w
+            GROUP BY w ORDER BY w
+            """, p).fetchall()
+        top = conn.execute(
+            f"""
+            SELECT u.id, u.email, u.name,
+                   COALESCE(sum(e.count) FILTER (WHERE e.kind = 'generate'), 0) AS gens,
+                   COALESCE(sum(e.count) FILTER (WHERE e.kind = 'upload'), 0),
+                   count(DISTINCT (e.created_at AT TIME ZONE %(tz)s)::date)
+            FROM usage_events e JOIN users u ON u.id = e.user_id
+            WHERE e.created_at >= {since}
+            GROUP BY u.id ORDER BY gens DESC LIMIT 10
+            """, p).fetchall()
+        totals = conn.execute(
+            f"""
+            SELECT COALESCE(sum(count) FILTER (WHERE kind = 'generate'), 0),
+                   COALESCE(sum(count) FILTER (WHERE kind = 'upload'), 0),
+                   count(DISTINCT user_id)
+            FROM usage_events WHERE created_at >= {since}
+            """, p).fetchone()
+    return {
+        "days": days, "timezone": USAGE_TZ,
+        "totals": {"generations": int(totals[0]), "uploads": int(totals[1]), "activeUsers": int(totals[2])},
+        "daily": [{"date": r[0], "generations": int(r[1]), "uploads": int(r[2]), "activeUsers": int(r[3])} for r in daily],
+        "hourly": [{"hour": int(r[0]), "generations": int(r[1])} for r in hourly],
+        "weekday": [{"day": int(r[0]), "generations": int(r[1])} for r in weekday],
+        "topUsers": [{"id": str(r[0]), "email": r[1], "name": r[2], "generations": int(r[3]),
+                      "uploads": int(r[4]), "activeDays": int(r[5])} for r in top],
+    }
+
+
+def admin_generations(limit=24, before=None, user_id=None):
+    """Newest generations with their input swatches and output images."""
+    p = {"limit": max(1, min(int(limit), 100))}
+    where = []
+    if before:
+        where.append("b.created_at < %(before)s")
+        p["before"] = before
+    if user_id:
+        uid = _valid_uuid(user_id)
+        if not uid:
+            return []
+        where.append("b.user_id = %(uid)s")
+        p["uid"] = uid
+    sql = f"""
+        SELECT b.data, b.created_at, u.id, u.email, u.name
+        FROM batches b LEFT JOIN users u ON u.id = b.user_id
+        {"WHERE " + " AND ".join(where) if where else ""}
+        ORDER BY b.created_at DESC LIMIT %(limit)s
+    """
+    with connect() as conn:
+        rows = conn.execute(sql, p).fetchall()
+    out = []
+    for data, at, uid, email, name in rows:
+        comps = data.get("uploadedComponents") or {}
+        out.append({
+            "id": data.get("id"), "createdAt": at.isoformat(),
+            "user": {"id": str(uid) if uid else None, "email": email, "name": name},
+            "description": data.get("description") or "",
+            "engine": data.get("engine"), "style": data.get("style"),
+            "params": data.get("params"),
+            # Only URLs leave the server (fallback entries also carry a disk path)
+            "inputs": {k: [{"label": c.get("label"), "image": c.get("image") or c.get("url")}
+                           for c in comps.get(k, [])] for k in ("border", "body", "pallu", "scroll")},
+            "outputs": [{"name": d.get("name"), "wearable": d.get("image"),
+                         "template": d.get("templateImage")} for d in data.get("designs") or []],
+        })
+    return out

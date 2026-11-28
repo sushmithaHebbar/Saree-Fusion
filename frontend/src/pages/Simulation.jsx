@@ -1,6 +1,12 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { UploadCloud, X, Download, Printer, RefreshCw, ArrowLeft, LogOut, ArrowRight, ChevronDown } from 'lucide-react';
+import {
+  UploadCloud, X, Download, Printer, RefreshCw, ArrowLeft, LogOut, ArrowRight,
+  Palette, Layers, Ruler, Image as ImageIcon, Flower2, Frame, Maximize2, MoveVertical,
+  GalleryHorizontal, Repeat, Grid3x3, PanelLeftOpen,
+} from 'lucide-react';
+import StudioSidebar from '../components/saree/StudioSidebar';
+import { ScaleInput, RotationInput } from '../components/saree/TransformInputs';
 import { useSareeDesign } from '../context/SareeDesignContext.jsx';
 import ColorPickerOverlay from '../components/saree/ColorPickerOverlay';
 import CadViewer from '../components/saree/CadViewer';
@@ -9,6 +15,9 @@ import CollectionAutoSaver from '../components/saree/CollectionAutoSaver';
 import GeneratingOverlay from '../components/saree/GeneratingOverlay';
 import { generateBatch } from '../utils/generateBatch';
 import { haptic } from '../utils/haptics';
+import { DEFAULT_PARAMS, computeSpecs } from '../utils/sareeLayout';
+import { dominantGround } from '../utils/motifGround';
+import { useUsage, usageMessage } from '../utils/usage';
 
 const VIEWS = [
   { key: 'layout', label: 'Flat template' },
@@ -32,46 +41,9 @@ function loadImage(url) {
   });
 }
 
-// ─── Default parameters matching standard saree CAD layout ───────────────────
-const DEF = {
-  epi: 120, ppi: 80,
-  leftBorderIn: 6, rightBorderIn: 6, bodyWidthIn: 36,
-  sareeLenIn: 216, blousePieceIn: 32, // 5.5 m saree + 0.8 m blouse piece
-  palluLenIn: 45.6, blendIn: 3, motifAlong: 24,
-  motifRepsAcross: 3, borderHooks: 480, bodyHooks: 1920,
-};
-
-// ─── Compute all derived technical specs ─────────────────────────────────────
-function computeSpecs(p) {
-  const totalW = p.leftBorderIn + p.bodyWidthIn + p.rightBorderIn;
-  return {
-    warpEnds: {
-      leftBorder: Math.round(p.epi * p.leftBorderIn),
-      body:       Math.round(p.epi * p.bodyWidthIn),
-      rightBorder:Math.round(p.epi * p.rightBorderIn),
-      total:      Math.round(p.epi * totalW),
-    },
-    hooks: {
-      perBorder:     p.borderHooks,
-      body:          p.bodyHooks,
-      perBodyRepeat: Math.round(p.bodyHooks / Math.max(1, p.motifRepsAcross)),
-      total:         2 * p.borderHooks + p.bodyHooks,
-    },
-    picks: {
-      pallu:       Math.round(p.ppi * p.palluLenIn),
-      blendBand:   Math.round(p.ppi * p.blendIn),
-      motifRow:    Math.round(p.ppi * (p.motifAlong / 2)),
-      bodyRepeat:  Math.round(p.ppi * p.motifAlong),
-    },
-    repeat: {
-      across:        (p.bodyWidthIn / Math.max(1, p.motifRepsAcross)).toFixed(1),
-      along:         p.motifAlong.toFixed(1),
-      borderRepeats: Math.ceil(p.palluLenIn / Math.max(0.1, p.motifAlong)),
-      borderStretch: (p.palluLenIn /
-        (Math.ceil(p.palluLenIn / Math.max(0.1, p.motifAlong)) * p.motifAlong)).toFixed(3),
-    },
-  };
-}
+// Defaults, specs and layout geometry live in one shared module, read by the
+// flat template, the CAD sketch and the telemetry cards alike.
+const DEF = DEFAULT_PARAMS;
 
 // ─── BMP encoder (24-bit, top-down) ──────────────────────────────────────────
 function encodeImageDataAsBMP(imageData) {
@@ -135,39 +107,67 @@ function extractYarnColors(ctx, w, h) {
 const panel = 'rounded-2xl border border-line bg-glass backdrop-blur-md';
 const tap = 'sf-tap inline-flex min-h-11 items-center justify-center gap-2 rounded-xl px-4 text-sm font-semibold';
 
-function SectionTitle({ children }) {
-  return <div className="mb-2 mt-4 text-[11px] font-bold uppercase tracking-widest text-gold first:mt-0">{children}</div>;
-}
+// ─── Number input ─────────────────────────────────────────────────────────────
+// Keeps the typed text as a draft, so "", "4." or "-" never get forced into a
+// number mid-edit. Every valid value within range is applied immediately (the
+// layout redraws live); blur snaps the field back to the clamped value.
+function NumInput({ label, unit, value, onChange, min = 0, max = Infinity, step = 1 }) {
+  const [draft, setDraft] = useState(String(value));
+  const [editing, setEditing] = useState(false);
+  useEffect(() => { if (!editing) setDraft(String(value)); }, [value, editing]);
 
-// Collapsible on phones/tablets; always open from the xl breakpoint up
-function Accordion({ title, children, defaultOpen = false }) {
-  const [open, setOpen] = useState(defaultOpen);
+  const clamp = (n) => Math.min(max, Math.max(min, n));
   return (
-    <section className={`${panel} overflow-hidden`}>
-      <button type="button" onClick={() => setOpen(o => !o)} aria-expanded={open}
-        className="sf-tap flex min-h-12 w-full items-center justify-between px-4 text-left text-sm font-bold text-fg xl:pointer-events-none">
-        {title}
-        <ChevronDown size={18} className={`text-muted transition-transform xl:hidden ${open ? 'rotate-180' : ''}`} />
-      </button>
-      <div className={`${open ? 'block' : 'hidden'} px-4 pb-4 xl:block`}>{children}</div>
-    </section>
+    <label className="mb-2.5 block">
+      <span className="text-xs text-muted">{label}</span>
+      <span className="relative mt-1 block">
+        <input
+          type="text" inputMode="decimal" value={draft}
+          onFocus={() => setEditing(true)}
+          onChange={e => {
+            const text = e.target.value;
+            if (!/^-?\d*\.?\d*$/.test(text)) return;       // digits, one dot only
+            setDraft(text);
+            const n = parseFloat(text);
+            if (Number.isFinite(n) && n >= min && n <= max) onChange(n);
+          }}
+          onBlur={() => {
+            setEditing(false);
+            const n = parseFloat(draft);
+            const next = Number.isFinite(n) ? clamp(n) : value;
+            if (next !== value) onChange(next);
+            setDraft(String(next));
+          }}
+          onKeyDown={e => {
+            if (e.key === 'Enter') e.currentTarget.blur();
+            if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+              e.preventDefault();
+              const n = clamp(+(value + (e.key === 'ArrowUp' ? step : -step)).toFixed(4));
+              onChange(n);
+              setDraft(String(n));
+            }
+          }}
+          className="h-11 w-full rounded-xl border border-line bg-surface-2/70 pl-3 pr-20 text-base tabular-nums text-fg focus:border-gold focus:outline-none"
+        />
+        <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted/80">{unit}</span>
+      </span>
+    </label>
   );
 }
 
-// ─── Number input ─────────────────────────────────────────────────────────────
-function NumInput({ label, unit, value, onChange, min = 0, step = 1 }) {
+function Toggle({ label, hint, checked, onChange }) {
   return (
-    <label className="mb-2.5 block">
-      <span className="flex items-center justify-between text-xs">
-        <span className="text-muted">{label}</span>
-        <span className="text-muted/70">{unit}</span>
+    <div className="mb-2.5 flex items-start justify-between gap-3">
+      <span>
+        <span className="block text-xs text-fg">{label}</span>
+        {hint && <span className="block text-[11px] text-muted">{hint}</span>}
       </span>
-      <input
-        type="number" inputMode="decimal" min={min} step={step} value={value}
-        onChange={e => onChange(parseFloat(e.target.value) || 0)}
-        className="mt-1 h-11 w-full rounded-xl border border-line bg-surface-2/70 px-3 text-base text-fg focus:border-gold focus:outline-none"
-      />
-    </label>
+      <button type="button" role="switch" aria-checked={checked} aria-label={label}
+        onClick={() => onChange(!checked)}
+        className={`sf-tap relative h-7 w-12 shrink-0 rounded-full border transition-colors ${checked ? 'border-gold bg-gold' : 'border-line bg-surface-2'}`}>
+        <span className={`absolute top-0.5 h-5.5 w-5.5 rounded-full bg-white shadow transition-[left] ${checked ? 'left-[calc(100%-1.5rem)]' : 'left-0.5'}`} />
+      </button>
+    </div>
   );
 }
 
@@ -186,12 +186,11 @@ function StatCard({ title, rows }) {
   );
 }
 
-// ─── Image uploader with motif controls ──────────────────────────────────────
-function MotifUploader({ label, slot, onChange }) {
+// ─── Image uploader with numeric scale + clockwise rotation ──────────────────
+function MotifUploader({ id, label, slot, onChange }) {
   const inputRef = useRef(null);
   return (
-    <div className="mb-3 rounded-2xl border border-line bg-surface-2/50 p-3">
-      <div className="mb-2 text-[11px] font-bold uppercase tracking-widest text-gold">{label}</div>
+    <div>
       {slot.url ? (
         <div className="relative mb-2">
           <img src={slot.url} alt={label} className="h-20 w-full rounded-xl object-cover" />
@@ -216,18 +215,10 @@ function MotifUploader({ label, slot, onChange }) {
           el.src = url;
         }}
       />
-      <label className="mb-1 block">
-        <span className="flex justify-between text-xs text-muted"><span>Scale</span><span>{slot.scale.toFixed(2)}×</span></span>
-        <input type="range" min="0.2" max="3" step="0.05" value={slot.scale}
-          onChange={e => onChange({ ...slot, scale: parseFloat(e.target.value) })}
-          className="h-8 w-full accent-[#e3bb4f]" />
-      </label>
-      <label className="block">
-        <span className="flex justify-between text-xs text-muted"><span>Rotation</span><span>{slot.rot}°</span></span>
-        <input type="range" min="0" max="360" step="1" value={slot.rot}
-          onChange={e => onChange({ ...slot, rot: parseInt(e.target.value) })}
-          className="h-8 w-full accent-[#e3bb4f]" />
-      </label>
+      <ScaleInput id={`${id}-scale`} label={label} scale={slot.scale}
+        onChange={scale => onChange({ ...slot, scale })} />
+      <RotationInput id={`${id}-rot`} label={label} rot={slot.rot}
+        onChange={rot => onChange({ ...slot, rot })} />
     </div>
   );
 }
@@ -267,16 +258,22 @@ export default function Simulation() {
   const [p, setP] = useState({ ...DEF, ...(restore?.params || {}) });
   const [imgs, setImgs] = useState({
     border: { url: null, el: null, color: '#c47b1a', tint: 0.4,  scale: 1, rot: 0, ...(restore?.palette?.border || {}) },
-    body:   { url: null, el: null, color: '#e01050', tint: 0.4,  scale: 1, rot: 0, ...(restore?.palette?.body || {}) },
+    // ground: base fabric colour behind the motif; auto-matched to the motif
+    // until the user picks one (groundAuto false)
+    body:   { url: null, el: null, color: '#e01050', tint: 0.4,  scale: 1, rot: 0, ground: null, groundAuto: true, ...(restore?.palette?.body || {}) },
     pallu:  { url: null, el: null, color: '#4a2080', tint: 0.35, scale: 1, rot: 0, ...(restore?.palette?.pallu || {}) },
   });
   const [view, setView] = useState('layout');
   const [drapeStyle, setDrapeStyle] = useState(assets.style || 'normal');
   const navigate = useNavigate();
   const [yarnColors, setYarnColors] = useState([]);
-  const [zoom, setZoom] = useState(0.5);
+  const [zoom, setZoom] = useState(0.75); // flat template opens at the 75% preset
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState('');
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const [usage, refreshUsage] = useUsage();         // X / 15 outputs used today
+  const usageBlocked = Boolean(usage?.blocked);
+  const closeTools = useCallback(() => setToolsOpen(false), []);
   const canvasRef = useRef(null);
   const imgsRef = useRef(imgs);
   useEffect(() => { imgsRef.current = imgs; }, [imgs]);
@@ -315,7 +312,7 @@ export default function Simulation() {
     setZoom(Math.max(0.1, Math.min(1, (box.clientWidth - 4) / w, (box.clientHeight || h) / h)));
   }, [zoom]);
 
-  const specs = computeSpecs(p);
+  const specs = useMemo(() => computeSpecs(p), [p]);
 
   // ── After every client-side redraw of the template ──
   const handleDraw = useCallback((canvas) => {
@@ -330,13 +327,25 @@ export default function Simulation() {
     description: assets.description || '',
     assetNames: assets.assetNames || {},
     palette: Object.fromEntries(['body', 'border', 'pallu'].map(k =>
-      [k, { color: imgs[k].color, tint: imgs[k].tint, scale: imgs[k].scale, rot: imgs[k].rot }])),
+      [k, { color: imgs[k].color, tint: imgs[k].tint, scale: imgs[k].scale, rot: imgs[k].rot,
+        ...(k === 'body' ? { ground: imgs.body.ground, groundAuto: imgs.body.groundAuto } : {}) }])),
     params: p,
   }), [drapeStyle, assets, imgs, p]);
 
   const setImg = useCallback((key, val) => setImgs(prev => ({ ...prev, [key]: val })), []);
   const patchImg = useCallback((key, patch) =>
     setImgs(prev => ({ ...prev, [key]: { ...prev[key], ...patch } })), []);
+
+  // Auto-match the body ground to the uploaded body motif (one motif only:
+  // whichever image is in the body slot). Re-runs when the motif changes or
+  // the user switches back to "Match motif".
+  const bodyEl = imgs.body.el;
+  const bodyGroundAuto = imgs.body.groundAuto !== false;
+  useEffect(() => {
+    if (!bodyEl || !bodyGroundAuto) return;
+    const g = dominantGround(bodyEl);
+    if (g) patchImg('body', { ground: g });
+  }, [bodyEl, bodyGroundAuto, patchImg]);
 
   // ── Auto-assemble from the assets handed over by the Design page ──
   useEffect(() => {
@@ -355,7 +364,7 @@ export default function Simulation() {
   // ── Next Step: compile both outputs on the backend (saved to batches.json),
   //    then land on the Result page ──
   async function handleNextStep() {
-    if (generating) return;
+    if (generating || usageBlocked) return;
     setGenerating(true);
     setGenError('');
     try {
@@ -370,6 +379,7 @@ export default function Simulation() {
       console.error(err);
       setGenError(err.message || 'Generation failed. Please try again.');
       setGenerating(false);
+      refreshUsage();   // a 429 means the limit / pause changed: show it
     }
   }
 
@@ -449,6 +459,132 @@ export default function Simulation() {
     win.document.close();
   }
 
+  // ── Sidebar tree: every design, transform and loom tool in one place ──
+  const toolTree = [
+    {
+      key: 'colour', label: 'Colours', icon: Palette, keywords: 'palette colourway color tint',
+      children: [
+        { key: 'colourways', label: 'Colour combinations', icon: Palette, keywords: 'body border pallu color tint preset',
+          render: () => <ColorPickerOverlay imgs={imgs} onChange={patchImg} /> },
+      ],
+    },
+    {
+      key: 'transform', label: 'Swatches & transform', icon: Layers, keywords: 'scale rotation rotate image motif upload',
+      children: [
+        { key: 'body', label: 'Body motifs', icon: Flower2, keywords: 'scale rotation clockwise ground base colour color',
+          render: () => (<>
+            <MotifUploader id="body" label="Body motif" slot={imgs.body} onChange={v => setImg('body', v)} />
+            <div className="mt-4 flex items-center justify-between gap-3 border-t border-line pt-3">
+              <span>
+                <span className="block text-xs text-fg">Ground colour</span>
+                <span className="block text-[11px] text-muted">
+                  {imgs.body.groundAuto !== false
+                    ? (imgs.body.el ? 'Matched to the motif' : 'Matches the motif once uploaded')
+                    : 'Custom'}
+                </span>
+              </span>
+              <span className="flex items-center gap-2">
+                {imgs.body.groundAuto === false && (
+                  <button type="button" onClick={() => patchImg('body', { groundAuto: true })}
+                    className="sf-tap min-h-9 rounded-lg px-2 text-xs text-muted hover:text-fg">Match motif</button>
+                )}
+                <input type="color" aria-label="Body ground colour"
+                  value={imgs.body.ground || imgs.body.color}
+                  onChange={e => patchImg('body', { ground: e.target.value, groundAuto: false })}
+                  className="h-9 w-12 cursor-pointer rounded-lg border border-line bg-transparent" />
+              </span>
+            </div>
+          </>) },
+        { key: 'border', label: 'Border motifs', icon: Frame, keywords: 'scale rotation clockwise top bottom border gap strip edge spacing height',
+          render: () => (<>
+            <MotifUploader id="border" label="Border motif" slot={imgs.border} onChange={v => setImg('border', v)} />
+            <div className="mt-4 border-t border-line pt-3">
+              <Toggle label="Strip above top border" hint="Plain strip at the saree edge, outside the top border"
+                checked={p.topGapOn} onChange={setParam('topGapOn')} />
+              {p.topGapOn && (
+                <NumInput label="Height" unit="cm" value={p.topGapCm} onChange={setParam('topGapCm')} min={0.1} max={30} step={0.5} />
+              )}
+              <Toggle label="Strip below bottom border" hint="Plain strip at the saree edge, outside the bottom border"
+                checked={p.bottomGapOn} onChange={setParam('bottomGapOn')} />
+              {p.bottomGapOn && (
+                <NumInput label="Height" unit="cm" value={p.bottomGapCm} onChange={setParam('bottomGapCm')} min={0.1} max={30} step={0.5} />
+              )}
+              {(p.topGapOn || p.bottomGapOn) && (
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs text-muted">Strip colour</span>
+                  <span className="flex items-center gap-2">
+                    {p.gapColor && (
+                      <button type="button" onClick={() => setParam('gapColor')('')}
+                        className="sf-tap min-h-9 rounded-lg px-2 text-xs text-muted hover:text-fg">Use body</button>
+                    )}
+                    <input type="color" aria-label="Strip colour" value={p.gapColor || imgs.body.color}
+                      onChange={e => setParam('gapColor')(e.target.value)}
+                      className="h-9 w-12 cursor-pointer rounded-lg border border-line bg-transparent" />
+                  </span>
+                </div>
+              )}
+            </div>
+          </>) },
+        { key: 'pallu', label: 'Pallu image', icon: ImageIcon, keywords: 'scale rotation clockwise',
+          render: () => <MotifUploader id="pallu" label="Pallu image" slot={imgs.pallu} onChange={v => setImg('pallu', v)} /> },
+      ],
+    },
+    {
+      key: 'loom', label: 'Loom parameters', icon: Ruler, keywords: 'inspect specs cad',
+      children: [
+        { key: 'dims', label: 'Dimensions', icon: Maximize2, keywords: 'epi ppi width border body',
+          render: () => (<>
+            <NumInput label="EPI (ends per inch)" unit="ends/in" value={p.epi} onChange={setParam('epi')} min={1} />
+            <NumInput label="PPI (picks per inch)" unit="picks/in" value={p.ppi} onChange={setParam('ppi')} min={1} />
+            <NumInput label="Left border width" unit="inches" value={p.leftBorderIn} onChange={setParam('leftBorderIn')} step={0.5} />
+            <NumInput label="Right border width" unit="inches" value={p.rightBorderIn} onChange={setParam('rightBorderIn')} step={0.5} />
+            <NumInput label="Body width" unit="inches" value={p.bodyWidthIn} onChange={setParam('bodyWidthIn')} step={0.5} />
+            <p className="mb-3 text-xs text-muted">
+              Total width: {(p.leftBorderIn + p.bodyWidthIn + p.rightBorderIn).toFixed(1)}"
+              {(p.topGapOn || p.bottomGapOn) && (() => {
+                const cm = (p.topGapOn ? p.topGapCm : 0) + (p.bottomGapOn ? p.bottomGapCm : 0);
+                return ` + ${cm} cm edge strips = ${(p.leftBorderIn + p.bodyWidthIn + p.rightBorderIn + cm / 2.54).toFixed(2)}"`;
+              })()}
+            </p>
+          </>) },
+        { key: 'length', label: 'Length (true scale)', icon: MoveVertical, keywords: 'saree blouse metres',
+          render: () => (<>
+            <NumInput label="Saree length" unit="inches" value={p.sareeLenIn} onChange={setParam('sareeLenIn')} min={60} />
+            <NumInput label="Blouse piece" unit="inches" value={p.blousePieceIn} onChange={setParam('blousePieceIn')} />
+            <p className="text-xs text-muted">
+              Total: {(p.sareeLenIn + p.blousePieceIn).toFixed(0)}" ≈ {((p.sareeLenIn + p.blousePieceIn) * 0.0254).toFixed(2)} m
+            </p>
+          </>) },
+        { key: 'pallublend', label: 'Pallu & blend', icon: GalleryHorizontal, keywords: 'pallu length blend band',
+          render: () => (<>
+            <NumInput label="Pallu length" unit="inches" value={p.palluLenIn} onChange={setParam('palluLenIn')} step={0.5} />
+            <NumInput label="Blend band" unit="inches" value={p.blendIn} onChange={setParam('blendIn')} step={0.5} />
+          </>) },
+        { key: 'repeat', label: 'Motif repeat', icon: Repeat, keywords: 'repeats across along height',
+          render: () => (<>
+            <NumInput label="Repeats across body" unit="count" value={p.motifRepsAcross} onChange={setParam('motifRepsAcross')} min={1} />
+            <NumInput label="Repeat along (motif height)" unit="inches" value={p.motifAlong} onChange={setParam('motifAlong')} min={0.5} step={0.5} />
+          </>) },
+        { key: 'hooks', label: 'Jacquard hooks', icon: Grid3x3, keywords: 'hooks border body',
+          render: () => (<>
+            <NumInput label="Hooks per border" unit="hooks" value={p.borderHooks} onChange={setParam('borderHooks')} min={1} />
+            <NumInput label="Hooks for body" unit="hooks" value={p.bodyHooks} onChange={setParam('bodyHooks')} min={1} />
+            <p className="mb-3 text-xs leading-relaxed text-muted">
+              Woven resolution: border {specs.resolution.border.toFixed(1)} hooks/in ·
+              body {specs.resolution.body.toFixed(1)} hooks/in ({specs.hooks.perBodyRepeat} per repeat).
+              {specs.resolution.coarse
+                ? <span className="text-gold"> Below 6/in: motifs coarsen in the preview.</span>
+                : ' The preview coarsens motifs once this drops below 6/in.'}
+            </p>
+            <button type="button" onClick={() => setP({ ...DEF })}
+              className={`${tap} mt-1 w-full border border-line bg-surface text-fg`}>
+              <RefreshCw size={14} /> Reset loom defaults
+            </button>
+          </>) },
+      ],
+    },
+  ];
+
   // ── UI ──
   const zoomPct = Math.round(zoom * 100);
   const presetActive = (v) => Math.abs(zoom - v) < 0.005;
@@ -469,6 +605,10 @@ export default function Simulation() {
           <p className="text-xs text-muted sm:text-sm">Flat template · CAD. Changes auto-save to your collection on exit.</p>
         </div>
         <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={() => setToolsOpen(true)} aria-label="Open studio tools"
+            className={`${tap} shrink-0 border border-gold/60 bg-surface text-gold xl:hidden`}>
+            <PanelLeftOpen size={16} /> Tools
+          </button>
           <button type="button" onClick={() => navigate(-1)} className={`${tap} shrink-0 border border-line bg-surface text-fg`}>
             <ArrowLeft size={16} /> Back
           </button>
@@ -481,17 +621,34 @@ export default function Simulation() {
           <button type="button" onClick={exportPrint} className={`${tap} shrink-0 border border-line bg-surface text-fg`}>
             <Printer size={16} /> PDF
           </button>
-          <button type="button" onClick={handleNextStep} disabled={generating}
+          {usage && (
+            <span className={`inline-flex min-h-11 shrink-0 items-center gap-2 rounded-xl border px-3 text-xs font-semibold tabular-nums ${
+              usageBlocked ? 'border-red-400/50 text-red-300' : 'border-line text-muted'}`}
+              title={usageMessage(usage) || `${usage.remaining} outputs left today`}>
+              {usage.paused ? 'Paused' : `${usage.used} / ${usage.limit}`}
+              <span className="font-normal">{usage.paused ? 'by admin' : 'outputs today'}</span>
+            </span>
+          )}
+          <button type="button" onClick={handleNextStep} disabled={generating || usageBlocked}
             className={`${tap} shrink-0 bg-gradient-to-br from-[#f2d874] to-gold text-[#1d1700] shadow-[0_8px_22px_rgba(201,162,39,0.3)] disabled:opacity-60`}>
             Next step <ArrowRight size={16} />
           </button>
         </div>
       </header>
+      {usageBlocked && (
+        <p role="status" className="-mt-2 mb-4 rounded-xl border border-red-400/40 bg-red-500/10 px-4 py-2.5 text-sm text-red-200">
+          {usageMessage(usage)}
+        </p>
+      )}
 
-      <div className="grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)_300px]">
+      <div className="grid gap-4 xl:grid-cols-[340px_minmax(0,1fr)]">
 
-        {/* ── Viewport ── (first on mobile, centre on desktop) */}
-        <main className="order-first min-w-0 space-y-3 xl:order-none">
+        {/* ── Single tool sidebar (drawer below xl) ── */}
+        <StudioSidebar tree={toolTree} open={toolsOpen} onClose={closeTools}
+          defaultOpen={['colour', 'transform', 'body']} />
+
+        {/* ── Viewport ── */}
+        <main className="min-w-0 space-y-3">
           <div className={`${panel} p-2`}>
             <div role="tablist" className="grid grid-cols-2 gap-1.5">
               {VIEWS.map(v => (
@@ -505,7 +662,7 @@ export default function Simulation() {
           </div>
 
           <div className={`${panel} relative p-2 sm:p-3`}>
-            {view === 'cad' && <div className="overflow-auto"><CadViewer params={p} specs={specs} /></div>}
+            {view === 'cad' && <div className="overflow-auto"><CadViewer params={p} specs={specs} imgs={imgs} /></div>}
 
             {/* The layout canvas stays mounted: it feeds yarn colours and the auto-save thumbnail */}
             <div className={view === 'layout' ? 'block' : 'hidden'}>
@@ -566,53 +723,6 @@ export default function Simulation() {
             </div>
           )}
         </main>
-
-        {/* ── Loom parameters ── */}
-        <div className="min-w-0 xl:order-first">
-          <Accordion title="Loom parameters">
-            <SectionTitle>Dimensions</SectionTitle>
-            <NumInput label="EPI (ends per inch)" unit="ends/in" value={p.epi} onChange={setParam('epi')} min={1} />
-            <NumInput label="PPI (picks per inch)" unit="picks/in" value={p.ppi} onChange={setParam('ppi')} min={1} />
-            <NumInput label="Left border width" unit="inches" value={p.leftBorderIn} onChange={setParam('leftBorderIn')} step={0.5} />
-            <NumInput label="Right border width" unit="inches" value={p.rightBorderIn} onChange={setParam('rightBorderIn')} step={0.5} />
-            <NumInput label="Body width" unit="inches" value={p.bodyWidthIn} onChange={setParam('bodyWidthIn')} step={0.5} />
-            <p className="mb-3 text-xs text-muted">Total width: {(p.leftBorderIn + p.bodyWidthIn + p.rightBorderIn).toFixed(1)}"</p>
-
-            <SectionTitle>Length (true scale)</SectionTitle>
-            <NumInput label="Saree length" unit="inches" value={p.sareeLenIn} onChange={setParam('sareeLenIn')} min={60} />
-            <NumInput label="Blouse piece" unit="inches" value={p.blousePieceIn} onChange={setParam('blousePieceIn')} />
-            <p className="mb-3 text-xs text-muted">
-              Total: {(p.sareeLenIn + p.blousePieceIn).toFixed(0)}" ≈ {((p.sareeLenIn + p.blousePieceIn) * 0.0254).toFixed(2)} m
-            </p>
-
-            <SectionTitle>Pallu &amp; blend</SectionTitle>
-            <NumInput label="Pallu length" unit="inches" value={p.palluLenIn} onChange={setParam('palluLenIn')} step={0.5} />
-            <NumInput label="Blend band" unit="inches" value={p.blendIn} onChange={setParam('blendIn')} step={0.5} />
-
-            <SectionTitle>Motif repeat</SectionTitle>
-            <NumInput label="Repeats across body" unit="count" value={p.motifRepsAcross} onChange={setParam('motifRepsAcross')} min={1} />
-            <NumInput label="Repeat along (motif height)" unit="inches" value={p.motifAlong} onChange={setParam('motifAlong')} step={0.5} />
-
-            <SectionTitle>Jacquard hooks</SectionTitle>
-            <NumInput label="Hooks per border" unit="hooks" value={p.borderHooks} onChange={setParam('borderHooks')} min={1} />
-            <NumInput label="Hooks for body" unit="hooks" value={p.bodyHooks} onChange={setParam('bodyHooks')} min={1} />
-
-            <button type="button" onClick={() => setP({ ...DEF })}
-              className={`${tap} mt-2 w-full border border-line bg-surface text-fg`}>
-              <RefreshCw size={14} /> Reset defaults
-            </button>
-          </Accordion>
-        </div>
-
-        {/* ── Design elements ── */}
-        <div className="min-w-0">
-          <Accordion title="Design elements" defaultOpen>
-            <div className="mb-3"><ColorPickerOverlay imgs={imgs} onChange={patchImg} /></div>
-            <MotifUploader label="Border image" slot={imgs.border} onChange={v => setImg('border', v)} />
-            <MotifUploader label="Body motif" slot={imgs.body} onChange={v => setImg('body', v)} />
-            <MotifUploader label="Pallu image" slot={imgs.pallu} onChange={v => setImg('pallu', v)} />
-          </Accordion>
-        </div>
       </div>
     </div>
   );

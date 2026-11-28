@@ -89,3 +89,70 @@
   .admin-root .ad-actions{grid-column:1/-1;justify-content:flex-start}
   .admin-root .ad-insp{grid-template-columns:1fr}.admin-root .ad-insp-list{max-height:180px}
 }
+/* ── usage analytics ── */
+.admin-root .ad-panel-h.wrap{flex-wrap:wrap}
+.admin-root .ad-usage h3{font-size:.92rem;margin:1rem 0 .4rem}
+.admin-root .ad-cards.compact{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));margin:.4rem 0 .4rem}
+.admin-root .ad-cards.compact .ad-card{background:rgba(255,255,255,.04);border-radius:12px}
+.admin-root .ad-seg{display:inline-flex;background:rgba(0,0,0,.25);border-radius:10px;padding:3px;gap:3px}
+.admin-root .ad-seg button{background:none;border:0;color:#aab0c8;padding:.4rem .75rem;border-radius:8px;font:inherit;font-size:.82rem;cursor:pointer}
+.admin-root .ad-seg button.on{background:#5b4fe0;color:#fff}
+.admin-root .ad-grid2{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+.admin-root .ad-chart g[tabindex]{outline:none;cursor:pointer}
+/* ── usage meter & credit controls ── */
+.admin-root .ad-meter{display:inline-flex;align-items:center;gap:.5rem;min-width:0}
+.admin-root .ad-meter-bar{width:90px;height:7px;border-radius:99px;background:rgba(255,255,255,.1);overflow:hidden;flex:none}
+.admin-root .ad-meter.compact .ad-meter-bar{width:52px}
+.admin-root .ad-meter-bar i{display:block;height:100%;border-radius:inherit;background:#34d3b6}
+.admin-root .ad-meter.warn .ad-meter-bar i{background:#f5b84b}
+.admin-root .ad-meter.full .ad-meter-bar i,.admin-root .ad-meter.paused .ad-meter-bar i{background:#ff7a7a}
+.admin-root .ad-meter.paused .ad-meter-bar i{width:100%!important;opacity:.5}
+.admin-root .ad-meter-txt{font-variant-numeric:tabular-nums;font-size:.85rem;white-space:nowrap}
+.admin-root .ad-meter.full .ad-meter-txt,.admin-root .ad-meter.paused .ad-meter-txt{color:#ff9d9d}
+.admin-root .ad-credits{display:grid;gap:.7rem;margin:.8rem 0;padding:.9rem;border-radius:12px;background:rgba(0,0,0,.2);border:1px solid rgba(255,255,255,.08)}
+.admin-root .ad-credits-top{display:grid;gap:.3rem}
+.admin-root .ad-credits-actions{display:flex;flex-wrap:wrap;gap:.45rem;align-items:center}
+.admin-root .ad-inline{display:flex;gap:.4rem;align-items:center}
+.admin-root .ad-inline input{width:80px;padding:.45rem .6rem}
+.admin-root .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+/* ── generations gallery ── */
+.admin-root .ad-gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}
+.admin-root .ad-gcard{position:relative;padding:.7rem;display:grid;gap:.55rem;transition:border-color .15s}
+.admin-root .ad-gcard:hover{border-color:rgba(139,123,255,.6)}
+.admin-root .ad-gcard-hit{position:absolute;inset:0;background:none;border:0;cursor:pointer;border-radius:inherit;z-index:1}
+.admin-root .ad-gcard-hit:focus-visible{outline:2px solid #8b7bff}
+.admin-root .ad-gcard-imgs{display:grid;grid-template-columns:auto 14px 1fr;align-items:center;gap:.5rem}
+.admin-root .ad-gcard-in{display:grid;gap:5px}
+.admin-root .ad-chip-img{position:relative;width:52px;height:52px;border-radius:8px;overflow:hidden;background:#151627;display:block}
+.admin-root .ad-chip-img img{width:100%;height:100%;object-fit:cover}
+.admin-root .ad-chip-img small{position:absolute;left:0;right:0;bottom:0;font-size:9px;text-align:center;background:rgba(0,0,0,.55);color:#e8eaf6}
+.admin-root .ad-arrow{color:#8a90a8;text-align:center}
+.admin-root .ad-gcard-out{height:170px;border-radius:10px;overflow:hidden;background:#fff}
+.admin-root .ad-gcard-out img{width:100%;height:100%;object-fit:contain}
+.admin-root .ad-gcard-meta{display:grid;gap:.1rem;min-width:0}
+.admin-root .ad-gcard-meta b{font-size:.88rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.admin-root .ad-more{justify-self:center;margin-top:.4rem}
+/* viewer */
+.admin-root .ad-io{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:1.2rem;margin-top:.8rem}
+.admin-root .ad-io h3{margin:.1rem 0 .6rem;font-size:.95rem}
+.admin-root .ad-io figure{margin:0 0 .8rem}
+.admin-root .ad-io figcaption{font-size:.8rem;margin-top:.3rem}
+.admin-root .ad-io-inputs{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:.7rem}
+.admin-root .ad-img{display:block;width:100%;padding:0;border:1px solid rgba(255,255,255,.12);border-radius:10px;overflow:hidden;background:#151627;cursor:zoom-in}
+.admin-root .ad-img img{display:block;width:100%;height:100%;object-fit:contain}
+.admin-root .ad-img.big{aspect-ratio:1}.admin-root .ad-img.tall{height:min(60vh,520px);background:#fff}
+.admin-root .ad-img.wide{aspect-ratio:9/2;background:#fff}
+.admin-root .ad-img.missing{display:grid;place-items:center;color:#8a90a8;font-size:.8rem;aspect-ratio:1;cursor:default}
+.admin-root .ad-params{display:grid;grid-template-columns:auto 1fr;gap:.3rem .8rem;font-size:.85rem;margin:.4rem 0 0}
+.admin-root .ad-params dt{color:#8a90a8}.admin-root .ad-params dd{margin:0;white-space:pre-wrap}
+.admin-root .ad-zoom{position:fixed;inset:0;background:rgba(0,0,0,.88);display:grid;place-items:center;z-index:30;cursor:zoom-out;padding:12px}
+.admin-root .ad-zoom img{max-width:100%;max-height:100%;object-fit:contain;border-radius:8px;background:#fff}
+@media (max-width:1023px){
+  .admin-root .ad-io{grid-template-columns:1fr}
+  .admin-root .ad-grid2{grid-template-columns:1fr}
+}
+@media (max-width:767px){
+  .admin-root .ad-gallery{grid-template-columns:1fr}
+  .admin-root .ad-credits-actions .ad-btn{flex:1 1 auto}
+  .admin-root .ad-inline{flex:1 1 100%}.admin-root .ad-inline input{flex:1}
+}

@@ -161,6 +161,18 @@ def is_locked_out(ip) -> bool:
     return db.recent_failed_attempts(ip, LOCKOUT_MINUTES) >= MAX_ATTEMPTS
 
 
+def has_valid_session() -> bool:
+    """True when the request carries a valid admin session cookie (no raise)."""
+    token = request.cookies.get(COOKIE_NAME)
+    if not token:
+        return False
+    try:
+        read_session(token)
+        return True
+    except AdminAuthError:
+        return False
+
+
 def require_admin(view):
     """Reject the request unless a valid admin session cookie is present."""
 

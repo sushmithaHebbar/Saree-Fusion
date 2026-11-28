@@ -17,6 +17,7 @@ except ImportError:
     pass
 
 from saree_generator import GenerateSaree, GenerateComplete
+import wearable_drape
 import db
 import auth
 import blobstore
@@ -232,75 +233,19 @@ def generate_template(pallu_path, border_path, body_path, out_path):
     return generate_saree_template(body_path, pallu_path, border_path, out_path)
 
 def synthesize_realistic_wearable(body_path, pallu_path, border_path, out_path):
-    """
-    Synthesizes a high-fashion, photorealistic studio photograph of an elegant mannequin
-    wearing the custom saree with authentic fabric drape, 3D folds, and lighting.
-    """
-    mannequin_base_path = os.path.join(ASSETS_DIR, "mannequin_base.jpg")
-    mask_b_path = os.path.join(ASSETS_DIR, "mask_body.png")
-    mask_br_path = os.path.join(ASSETS_DIR, "mask_border.png")
-    mask_p_path = os.path.join(ASSETS_DIR, "mask_pallu.png")
+    """Offline wearable drape (no API key, no network): maps the exact body,
+    border and pallu swatches onto the mannequin with cleaned, feathered region
+    masks and fold shading. See wearable_drape.py."""
+    return wearable_drape.render_wearable(
+        body_path, pallu_path, border_path, out_path,
+        assets_dir=ASSETS_DIR, demo_dir=os.path.join(STATIC_DIR, "demo_reference"),
+    )
 
-    if not os.path.exists(mannequin_base_path):
-        mannequin_base_path = os.path.join(STATIC_DIR, "demo_reference", "wearable_output.jpg")
-        mask_b_path = os.path.join(STATIC_DIR, "demo_reference", "mask_body.png")
-        mask_br_path = os.path.join(STATIC_DIR, "demo_reference", "mask_border.png")
-        mask_p_path = os.path.join(STATIC_DIR, "demo_reference", "mask_pallu.png")
 
-    base = cv2.imread(mannequin_base_path)
-    body = cv2.imread(body_path)
-    pallu = cv2.imread(pallu_path)
-    border = cv2.imread(border_path)
-
-    if base is None or body is None or pallu is None or border is None:
-        print("Error: Missing asset or swatch for wearable synthesis.")
-        return False
-
-    mask_body = cv2.imread(mask_b_path, 0)
-    mask_border = cv2.imread(mask_br_path, 0)
-    mask_pallu = cv2.imread(mask_p_path, 0)
-
-    h, w = base.shape[:2]
-
-    # Extract realistic luminance/shading channel from the base mannequin folds
-    gray = cv2.cvtColor(base, cv2.COLOR_BGR2GRAY)
-    shading = gray.astype(float) / 255.0
-    shading = 0.4 + 0.6 * shading
-
-    # Tile body fabric naturally across the canvas
-    bh, bw = body.shape[:2]
-    b_tile_resized = cv2.resize(body, (max(80, bw), max(80, bh)))
-    body_canvas = np.zeros((h, w, 3), dtype=np.uint8)
-    for y in range(0, h, b_tile_resized.shape[0]):
-        for x in range(0, w, b_tile_resized.shape[1]):
-            cy = min(b_tile_resized.shape[0], h - y)
-            cx = min(b_tile_resized.shape[1], w - x)
-            body_canvas[y:y+cy, x:x+cx] = b_tile_resized[:cy, :cx]
-
-    # Scale border and pallu to canvas size
-    border_canvas = cv2.resize(border, (w, h))
-    pallu_canvas = cv2.resize(pallu, (w, h))
-
-    # Apply authentic 3D shading
-    shaded_body = np.clip(body_canvas.astype(float) * shading[:, :, np.newaxis], 0, 255).astype(np.uint8)
-    shaded_border = np.clip(border_canvas.astype(float) * shading[:, :, np.newaxis], 0, 255).astype(np.uint8)
-    shaded_pallu = np.clip(pallu_canvas.astype(float) * shading[:, :, np.newaxis], 0, 255).astype(np.uint8)
-
-    result = base.copy()
-    if mask_body is not None:
-        b_idx = mask_body > 128
-        result[b_idx] = shaded_body[b_idx]
-
-    if mask_pallu is not None:
-        p_idx = mask_pallu > 128
-        result[p_idx] = shaded_pallu[p_idx]
-
-    if mask_border is not None:
-        br_idx = mask_border > 128
-        result[br_idx] = shaded_border[br_idx]
-
-    cv2.imwrite(out_path, result)
-    return True
+def wearable_offline_only():
+    """WEARABLE_ENGINE=offline skips Gemini for both outputs (wearable image
+    and flat template): everything is rendered locally, no API key."""
+    return os.environ.get("WEARABLE_ENGINE", "").strip().lower() == "offline"
 
 def drape_saree(model_path, body_path, border_path, out_path):
     """Compatibility wrapper calling high-definition wearable synthesis."""
@@ -321,6 +266,8 @@ def generate_ai_saree(body_path, pallu_path, border_path, description, style, we
     # Try AI-generated flat-lay first; fall back to programmatic tiling if unavailable.
     templed_image = None
     try:
+        if wearable_offline_only():
+            raise RuntimeError("offline engine selected: programmatic template")
         border_img = Image.open(border_path).convert('RGB')
         pallu_img = Image.open(pallu_path).convert('RGB')
         body_img = Image.open(body_path).convert('RGB')
@@ -330,7 +277,8 @@ def generate_ai_saree(body_path, pallu_path, border_path, description, style, we
             templed_image.save(template_out_path, format="PNG")
             print(f"AI flat-lay template saved at: {template_out_path}")
     except Exception as e_ai_tmpl:
-        print(f"AI template attempt note: {e_ai_tmpl}")
+        if not wearable_offline_only():
+            print(f"AI template attempt note: {e_ai_tmpl}")
         templed_image = None
 
     if not templed_image:
@@ -362,7 +310,11 @@ def generate_ai_saree(body_path, pallu_path, border_path, description, style, we
         custom_prompt += f" Draping style: {style}."
 
     saree_design = None
+    if wearable_offline_only():
+        print("WEARABLE_ENGINE=offline: rendering the wearable drape locally.")
     try:
+        if wearable_offline_only():
+            raise RuntimeError("offline wearable engine selected")
         border_img = Image.open(border_path).convert('RGB')
         pallu_img = Image.open(pallu_path).convert('RGB')
         body_img = Image.open(body_path).convert('RGB')
@@ -374,7 +326,8 @@ def generate_ai_saree(body_path, pallu_path, border_path, description, style, we
             aspect_ratio_img=aspect_ratio_img
         )
     except Exception as e_pred:
-        print(f"Gemini predict attempt note: {e_pred}")
+        if not wearable_offline_only():
+            print(f"Gemini predict attempt note: {e_pred}")
 
     if saree_design:
         saree_design.save(wearable_out_path, format="PNG")
@@ -452,6 +405,10 @@ def _may_read_static(filename):
         return False
 
     if norm.startswith(PUBLIC_STATIC_PREFIXES):
+        return True
+
+    # Admins inspect every user's swatches and outputs (Generations gallery)
+    if admin.has_valid_session():
         return True
 
     parts = norm.split("/")
@@ -681,6 +638,20 @@ def get_batch(batch_id):
 @auth.require_auth
 def generate():
     """Accepts component uploads and generates the saree layouts."""
+    # Daily output credits: refuse before doing any work
+    user_id = auth.current_user_id()
+    usage = db.usage_status(user_id)
+    if usage and usage["blocked"]:
+        if usage["paused"]:
+            msg = ("Generation is paused for your account by the administrator. "
+                   "Please wait until the next day, or contact support.")
+            code = "paused"
+        else:
+            msg = (f"You have used all {usage['limit']} outputs for today. "
+                   "Please wait until tomorrow for your credits to reset.")
+            code = "limit_reached"
+        return jsonify({"error": msg, "code": code, "usage": usage}), 429
+
     # Create distinct batch ID
     now = datetime.now()
     batch_id = f"FS-{now.strftime('%Y-%m-%d-%H%M%S')}"
@@ -810,6 +781,7 @@ def generate():
         "generatedDesigns": 1,
         "extraCount": 0,
         "description": description,
+        "style": style,
         "engine": gen_engine,
         "thumbnails": [designs[0]["image"]],
         "uploadedComponents": {
@@ -824,7 +796,22 @@ def generate():
     save_batch(new_batch)
     _persist_generated(batch_dir)
 
+    # Metering: one output per generation, plus the images this request uploaded
+    try:
+        db.record_usage(user_id, "generate", len(designs), batch_id)
+        db.record_usage(user_id, "upload", len(pallus) + len(borders) + len(bodies) + len(scrolls), batch_id)
+        new_batch["usage"] = db.usage_status(user_id)
+    except Exception as e:  # metering must never lose a finished generation
+        print(f"Usage metering failed for {batch_id}: {e}")
+
     return jsonify(new_batch)
+
+
+@app.route('/api/usage', methods=['GET'])
+@auth.require_auth
+def my_usage():
+    """Today's output credits for the signed-in weaver (X / 15 used)."""
+    return jsonify(db.usage_status(auth.current_user_id()) or {})
 
 # --- Orders and Jacquard Generation ---
 

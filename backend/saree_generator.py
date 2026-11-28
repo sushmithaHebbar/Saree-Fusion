@@ -34,6 +34,15 @@ class GenerateSaree:
     def __init__(self):
         pass
 
+    @staticmethod
+    def _prep_swatch(img_pil, flatten):
+        import wearable_drape  # shared offline helpers
+        bgr = cv2.cvtColor(np.asarray(img_pil), cv2.COLOR_RGB2BGR)
+        bgr = wearable_drape._crop_fabric(bgr)
+        if flatten:
+            bgr = wearable_drape._flatten_lighting(bgr)
+        return Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+
     def apply_clahe(self, img_pil, clip_limit=1.2):
         img_cv = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
         lab = cv2.cvtColor(img_cv, cv2.COLOR_BGR2LAB)
@@ -65,6 +74,13 @@ class GenerateSaree:
           - pallu stretched to pallu_frac and cross-fades into the body
         """
         border, pallu, body = border.convert("RGB"), pallu.convert("RGB"), body.convert("RGB")
+        # Swatches are usually photos of fabric on a studio backdrop: crop to
+        # the fabric (else the backdrop tiles as a grid of boxes) and even out
+        # the photo's lighting so tiles join without seams. Pattern and
+        # average colour are unchanged.
+        border = self._prep_swatch(border, flatten=True)
+        body = self._prep_swatch(body, flatten=True)
+        pallu = self._prep_swatch(pallu, flatten=False)
         if refine:
             border = self.apply_clahe(border, 1.0)
             pallu  = self.apply_clahe(pallu,  1.2)
